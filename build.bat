@@ -1,0 +1,1 @@
+pyinstaller.exe -y --onefile --icon=morg.ico  main.py --name twitchbot
