@@ -1,32 +1,148 @@
-from twitchAPI.object.eventsub import ChannelPointsCustomRewardRedemptionAddEvent
 import requests
 import os
-
-YTM_HOST = os.getenv("YTM_HOST")
-YTM_PORT = os.getenv("YTM_PORT")
-
-SONG_REQUEST_EVENT_NAME = os.getenv("SONG_REQUEST_EVENT_NAME")
-
-POST = "POST"
-GET = "GET"
-PATCH = "PATCH"
-DELETE = "DELETE"
-
-base_url = f"http://{YTM_HOST}:{YTM_PORT}/"
-base_url_api = f"{base_url}api/v1/"
-
-session = requests.Session()
+from enum import Enum
+import websockets
+import asyncio
+import json
+import time
+import threading
 
 def log(message: str):
     print("[YTM] " + message)
 
-def api_request(method: str, endpoint: str, data: dict = None):
-    return session.request(
-        method = method,
-        url = base_url_api + endpoint,
-        json = data,
+class QueueItem():
+    def __init__(self, videoId: str, title: str, author: str, youtubeMusicId: str = ""):
+        self.VideoId = videoId
+        self.Title = title
+        self.Author = author
+        self.YoutubeMusicId = youtubeMusicId
+    
+    def __repr__(self):
+        return f"\"{self.Title}\" by {self.Author} ({self.VideoId})"
+
+class ApiHandler:
+    class SocketMessage(str, Enum):
+        PLAYER_POSITION_CHANGED = "POSITION_CHANGED"
+        VIDEO_CHANGED = "VIDEO_CHANGED"
+        REPEAT_MODE_CHANGED = "REPEAT_CHANGED"
+        SHUFFLE_MODE_CHANGED = "SHUFFLE_CHANGED"
+
+    class Method(str, Enum):
+        GET = "GET"
+        POST = "POST"
+        DELETE = "DELETE"
+        PATCH = "PATCH"
+
+
+    _base_url = f"{os.getenv("YTM_HOST")}:{os.getenv("YTM_PORT")}/"
+    _api_url = f"{_base_url}api/v1/"
+    _session = requests.Session()
+    _socket = None
+
+    @classmethod
+    def Request(cls, method: str, endpoint: str, data: dict = None):
+        return cls._session.request(method, f"http://{cls._api_url}{endpoint}", json=data)
+
+    @classmethod
+    def IsConnected(cls) -> bool:
+        try:
+            r = cls.Request(ApiHandler.Method.GET, "song")
+            return r.status_code == 200
+        except:
+            return False
+
+    @classmethod
+    async def Authenticate(cls):
+        try:
+            r = requests.request(ApiHandler.Method.POST, f"http://{cls._base_url}auth/twitchbot")
+            if not r.status_code == 200:
+                log(f"Failed to authenticate with YTM API, status code {r.status_code}.")
+                return
+        except Exception as e:
+                log(f"Failed to authenticate with YTM API: {e}")
+                return
+        
+        header = {"Authorization": f"Bearer {r.json()['accessToken']}"}
+        cls._session.headers.update(header)
+        cls._socket = await websockets.connect(f"ws://{cls._api_url}ws", additional_headers=header)
+        asyncio.create_task(cls._socketListener())
+
+        log("Authenticated with YTM API.")
+
+    @classmethod
+    async def _socketListener(cls):
+        async with cls._socket as ws:
+            while True:
+                try:
+                    msg = await ws.recv()
+                    
+                    msg = json.loads(msg)
+                    match msg.get("type"):
+                        case cls.SocketMessage.VIDEO_CHANGED:
+                            print("VIDEO CHANGED")
+                            song = msg.get("song")
+                            videoId = song.get("videoId")
+                            
+                            if len(twitchQueue) == 0: return
+
+                            if videoId == twitchQueue[0].VideoId or videoId == twitchQueue[0].YoutubeMusicId:
+                                twitchQueue.pop(0)
+                            else: # playlist must have been changed manually
+                                queueLen = len(twitchQueue)
+                                for i in range(queueLen):
+                                    SongInsert(f"https://www.youtube.com/watch?v={twitchQueue[i].VideoId}", True, queueLen - i - 1)
+
+
+
+
+                except websockets.ConnectionClosed:
+                    log("Lost connection to YTM API")
+                    break
+                except Exception as e:
+                    log(f"WebSocket error: {e}")
+                    break
+
+twitchQueue: list[QueueItem] = []
+
+def getQueue() -> tuple[list[QueueItem], int | None] | None:
+    if not ApiHandler.IsConnected():
+        log("Not connected to YTM API.")
+        return None
+
+    r = ApiHandler.Request(
+        method=ApiHandler.Method.GET,
+        endpoint="queue"
     )
 
+    if r.status_code != 200:
+        log(f"Failed to get queue with status code {r.status_code}.")
+        return None
+
+    outList = []
+    currentIndex = None
+    for item in r.json().get("items", []):
+        base = None
+
+        youtubeMusicId = None
+
+        if item.get("playlistPanelVideoRenderer"):
+            base = item["playlistPanelVideoRenderer"]
+        elif item.get("playlistPanelVideoWrapperRenderer"):
+            base = item["playlistPanelVideoWrapperRenderer"]["primaryRenderer"]["playlistPanelVideoRenderer"]
+            youtubeMusicId = item["playlistPanelVideoWrapperRenderer"]["counterpart"][0]["counterpartRenderer"]["playlistPanelVideoRenderer"]["videoId"]
+
+        if base:
+            outList.append(QueueItem(
+                base["videoId"],
+                base["title"]["runs"][0]["text"],
+                base["longBylineText"]["runs"][0]["text"],
+                youtubeMusicId
+            ))
+            if base.get("selected"):
+                currentIndex = len(outList) - 1
+
+
+    return outList, currentIndex
 
 def isYoutubeURL(url: str) -> bool:
     return url.startswith("https://www.youtube.com/watch?v=") \
@@ -44,25 +160,90 @@ def getYoutubeID(url: str) -> str:
     
     return url[pos:pos+11]
 
-def try_insert_song(url: str) -> bool:
-    succeeded = False
+def SongInsert(url, noTwitchQueueUpdate = False, overrideShift = None):
+    if not isYoutubeURL(url):
+        log(f"Invalid URL: {url}")
+        # TODO: Add refund here
+        return
 
-    if isYoutubeURL(url):
-        r = api_request(
-            method=POST,
-            endpoint="queue",
+    videoId = getYoutubeID(url)
+
+    insertRequest = ApiHandler.Request(
+        method=ApiHandler.Method.POST,
+        endpoint="queue",
+        data={
+            "videoId": videoId,
+            "insertPosition": "INSERT_AFTER_CURRENT_VIDEO",
+        }
+    )
+
+    if insertRequest.status_code != 204:
+        log(f"Failed to insert {videoId} into song queue with status code {insertRequest.status_code}.")
+        # TODO: Add refund here too
+        return
+
+    time.sleep(2) # Wait a bit for the queue to update
+
+    queue, currentIndex = getQueue()
+    if queue:
+        log(f"Succesfully inserted {queue[currentIndex + 1]} into song queue.")
+
+    if not noTwitchQueueUpdate:
+        twitchQueue.append(queue[currentIndex + 1])
+
+    shift = len(twitchQueue)
+    if overrideShift is not None:
+        shift = shift - overrideShift
+
+    if shift > 0:
+        ApiHandler.Request(ApiHandler.Method.PATCH,
+            endpoint=f"queue/{currentIndex + 1}",
             data={
-                "videoId": getYoutubeID(url),
-                "insertPosition": "INSERT_AFTER_CURRENT_VIDEO",
+                "toIndex": currentIndex + shift
             }
         )
 
-        if r.status_code == 204: succeeded = True
-    
-    log((f"Succesfully inserted" if succeeded else "Failed to insert") + f" {getYoutubeID(url)} into song queue.")
-    return succeeded
+def SongSkip():
+    playerInfoRequest = ApiHandler.Request(
+        method=ApiHandler.Method.GET,
+        endpoint="song"
+    )
 
-async def on_point_reward(event: ChannelPointsCustomRewardRedemptionAddEvent):
-    if event.event.reward.title == SONG_REQUEST_EVENT_NAME:
-        log(f"Received song request from {event.event.user_name}: {event.event.user_input}")
-        try_insert_song(event.event.user_input)
+    if not playerInfoRequest.status_code == 200:
+        log(f"Failed to get player info with status code {playerInfoRequest.status_code}.")
+        return
+
+    isPlaying = not playerInfoRequest.json()["isPaused"]
+    
+    if not isPlaying:
+        log("Music is paused, not skipping.")
+        return
+
+    skipRequest = ApiHandler.Request(
+        method=ApiHandler.Method.POST,
+        endpoint="next"
+    )
+
+    if skipRequest.status_code == 204:
+        log("Succesfully skipped current song.")
+
+    else:
+        log(f"Failed to skip current song with status code {skipRequest.status_code}.")
+
+def start_api_handler_thread():
+    def _thread_func():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _check_loop():
+            await ApiHandler.Authenticate()
+            while True:
+                await asyncio.sleep(30)
+                if not ApiHandler.IsConnected():
+                    await ApiHandler.Authenticate()
+
+        loop.run_until_complete(_check_loop())
+
+    threading.Thread(target=_thread_func, daemon=True).start()
+
+start_api_handler_thread()
