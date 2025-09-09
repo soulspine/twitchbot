@@ -13,7 +13,7 @@ import asyncio
 
 if not os.path.exists(".env"):
     print (".env file not found!")
-    exit(1)
+    os._exit(1)
 
 load_dotenv()
 
