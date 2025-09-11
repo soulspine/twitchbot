@@ -22,7 +22,8 @@ from modules import ytm_integration
 class ClientInfo(str, Enum):
     ID = os.getenv("CLIENT_ID")
     SECRET = os.getenv("CLIENT_SECRET")
-    SCOPE = [AuthScope.CHAT_READ, AuthScope.MODERATOR_READ_CHAT_MESSAGES, AuthScope.CHANNEL_READ_REDEMPTIONS, AuthScope.CHANNEL_MANAGE_REDEMPTIONS]
+
+SCOPES = [AuthScope.CHAT_READ, AuthScope.MODERATOR_READ_CHAT_MESSAGES, AuthScope.CHANNEL_READ_REDEMPTIONS, AuthScope.CHANNEL_MANAGE_REDEMPTIONS]
 
 class RedemptionEvent(str, Enum):
     SONG_REQUEST = os.getenv("YTM_SONG_REQUEST_EVENT_NAME")
@@ -36,7 +37,7 @@ def log(message: str, onlyFormat = False) -> str:
 async def run():
     # AUTHENTICATION
     twitch = await Twitch(ClientInfo.ID, ClientInfo.SECRET)
-    helper = UserAuthenticationStorageHelper(twitch, ClientInfo.SCOPE)
+    helper = UserAuthenticationStorageHelper(twitch, SCOPES)
     await helper.bind()
 
     user = await first(twitch.get_users())
