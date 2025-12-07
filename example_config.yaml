@@ -1,0 +1,14 @@
+client_id: "id"
+client_secret: "secret"
+
+youtube_music:
+  host: "127.0.0.1"
+  port: 26538
+  connection_retry_time: 15
+
+redemption_events:
+  song_request: "SONG REDEEM"
+  song_skip: "SKIP"
+
+commands:
+  song_info: "!song"
