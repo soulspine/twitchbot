@@ -10,7 +10,6 @@ from colorama import Fore, Back, Style
 from modules.config import cfg
 from modules import ytm_integration
 import asyncio
-import time
 
 SCOPES = [AuthScope.CHAT_READ, AuthScope.CHAT_EDIT, AuthScope.MODERATOR_READ_CHAT_MESSAGES, AuthScope.CHANNEL_READ_REDEMPTIONS]
 
@@ -37,7 +36,10 @@ async def run():
     await chat.join_room(user.login)
 
     try:
-        input(log("Program initialized succesfully. Press Enter to exit...\n", True))
+        log("Program initialized succesfully. Press Enter to exit...")
+        ytm_integration.Init()
+        input()
+
     finally:
         await eventSub.stop()
         chat.stop()
@@ -50,7 +52,9 @@ async def onChannelRedemption(event: ChannelPointsCustomRewardRedemptionAddEvent
     else: log(f"Event {Fore.GREEN}{event.event.reward.title}{Style.RESET_ALL} is not associated with any action. Ignoring it.")
 
 async def onChatMessage(msg: ChatMessage):
-    if msg.text == cfg["commands"]["song_info"]: await ytm_integration.SongInfoRequest(msg)
+    text = msg.text.strip()
+    if text.startswith(cfg["commands"]["song_info"]):
+        await msg.reply(ytm_integration.SongInfoRequest())
     else: pass
 
 asyncio.run(run())

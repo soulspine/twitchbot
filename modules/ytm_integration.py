@@ -36,7 +36,8 @@ class ApiHandler:
         DELETE = "DELETE"
         PATCH = "PATCH"
 
-
+    _connecting = False
+    _connected = False
     _base_url = f"{cfg["youtube_music"]["host"]}:{cfg["youtube_music"]["port"]}/"
     _api_url = f"{_base_url}api/v1/"
     _session = requests.Session()
@@ -48,44 +49,43 @@ class ApiHandler:
 
     @classmethod
     def IsConnected(cls) -> bool:
-        try:
-            r = cls.Request(ApiHandler.Method.GET, "song")
-            return r.status_code == 200
-        except:
-            return False
+        return cls._connected
 
     @classmethod
     async def Authenticate(cls):
+        if cls._connecting == True or cls._connected == True: return
+        cls._connecting = True
         try:
             r = requests.request(ApiHandler.Method.POST, f"http://{cls._base_url}auth/twitchbot")
             if not r.status_code == 200:
-                raise()
+                raise Exception(f"HTTP Status {r.status_code}")
         except Exception as e:
                 log(f"Failed to authenticate with YTM API. Retrying in {cfg["youtube_music"]["connection_retry_time"]} seconds.")
+                cls._connecting = False
                 return
-        
+
+
         header = {"Authorization": f"Bearer {r.json()['accessToken']}"}
         cls._session.headers.update(header)
         cls._socket = await websockets.connect(f"ws://{cls._api_url}ws", additional_headers=header)
         asyncio.create_task(cls._socketListener())
 
         log("Authenticated with YTM API.")
+        cls._connecting = False
+        cls._connected = True
 
     @classmethod
     async def _socketListener(cls):
-        async with cls._socket as ws:
-            while True:
-                try:
+        try:
+            async with cls._socket as ws:
+                while True:
                     msg = await ws.recv()
-                    
                     msg = json.loads(msg)
                     match msg.get("type"):
                         case cls.SocketMessage.VIDEO_CHANGED:
                             song = msg.get("song")
                             videoId = song.get("videoId")
-                            
                             if len(twitchQueue) == 0: return
-
                             if videoId == twitchQueue[0].VideoId or videoId == twitchQueue[0].YoutubeMusicId:
                                 twitchQueue.pop(0)
                             else: # playlist must have been changed manually
@@ -94,15 +94,14 @@ class ApiHandler:
                                 for i in range(queueLen):
                                     SongInsert(f"https://www.youtube.com/watch?v={twitchQueue[i].VideoId}", True, queueLen - i - 1)
 
-
-
-
-                except websockets.ConnectionClosed:
-                    log("Lost connection to YTM API")
-                    break
-                except Exception as e:
-                    log(f"WebSocket error")
-                    break
+        except websockets.ConnectionClosed:
+            log("Lost connection to YTM API.")
+        except Exception as e:
+            log(f"WebSocket error {e}.")
+        finally:
+            await cls._socket.close()
+            cls._socket = None
+            cls._connected = False
 
 twitchQueue: list[QueueItem] = []
 
@@ -240,23 +239,22 @@ def SongSkip():
     else:
         log(f"Failed to skip current song with status code {skipRequest.status_code}.")
 
-async def SongInfoRequest(ctx:ChatMessage):
-    if not ApiHandler.IsConnected():
-        log("Not connected to Youtube Music API. Skipping song info request.")
-        await ctx.reply("Nothing playing at the moment")
-        return
+def SongInfoRequest():
+    if ApiHandler.IsConnected():
+        infoRequest = ApiHandler.Request(
+            method=ApiHandler.Method.GET,
+            endpoint="song"
+        )
+        data = infoRequest.json()
+
+        if infoRequest.status_code == 200 and not data["isPaused"]:
+            title = data["title"]
+            artist = data["artist"]
+            video_id = data["videoId"]
+
+            return f'"{title}" by {artist} - https://youtu.be/{video_id}'
     
-    infoRequest = ApiHandler.Request(
-        method=ApiHandler.Method.GET,
-        endpoint="song"
-    )
-
-    data = infoRequest.json()
-
-    if infoRequest.status_code != 200 or data["isPaused"]:
-        await ctx.reply("Nothing playing at the moment")
-    else:
-        await ctx.reply(f"\"{data["title"]}\" by {data["artist"]} - https://youtu.be/{data["videoId"]}")
+    return "Nothing playing at the moment"
 
 def start_api_handler_thread():
     def _thread_func():
@@ -264,14 +262,14 @@ def start_api_handler_thread():
         asyncio.set_event_loop(loop)
 
         async def _check_loop():
-            await ApiHandler.Authenticate()
             while True:
-                await asyncio.sleep(cfg["youtube_music"]["connection_retry_time"])
                 if not ApiHandler.IsConnected():
                     await ApiHandler.Authenticate()
+                await asyncio.sleep(cfg["youtube_music"]["connection_retry_time"])
 
         loop.run_until_complete(_check_loop())
 
     threading.Thread(target=_thread_func, daemon=True).start()
 
-start_api_handler_thread()
+def Init():
+    start_api_handler_thread()
