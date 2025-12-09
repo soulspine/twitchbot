@@ -1,5 +1,4 @@
 import requests
-import os
 from enum import Enum
 import websockets
 import asyncio
@@ -8,7 +7,6 @@ import time
 import threading
 from colorama import Fore, Back, Style
 from modules.config import cfg
-from twitchAPI.chat import ChatMessage
 
 def log(message: str):
     print(f"{Style.BRIGHT}{Back.RED}{Fore.WHITE}[YTM]{Style.RESET_ALL} " + message)
@@ -21,7 +19,7 @@ class QueueItem():
         self.YoutubeMusicId = youtubeMusicId
     
     def __repr__(self):
-        return f"\"{self.Title}\" by {self.Author} ({self.VideoId})"
+        return f"\"{self.Title}\" by {self.Author} (https://youtu.be/{self.VideoId})"
 
 class ApiHandler:
     class SocketMessage(str, Enum):
@@ -161,7 +159,7 @@ def getYoutubeID(url: str) -> str:
     
     return url[pos:pos+11]
 
-def SongInsert(url, noTwitchQueueUpdate = False, overrideShift = None):
+def SongInsert(url, noTwitchQueueUpdate = False, overrideShift = None) -> tuple[str, int] | None:
     if not ApiHandler.IsConnected():
         log("Not connected to Youtube Music API. Skipping song insert request.")
         return
@@ -208,10 +206,14 @@ def SongInsert(url, noTwitchQueueUpdate = False, overrideShift = None):
             }
         )
 
-def SongSkip():
+    queue, currentIndex = getQueue()
+    if queue:
+        return tuple([str(queue[currentIndex + shift]), shift])
+
+def SongSkip() -> bool:
     if not ApiHandler.IsConnected():
         log("Not connected to Youtube Music API. Skipping song skip request.")
-        return
+        return False
 
     playerInfoRequest = ApiHandler.Request(
         method=ApiHandler.Method.GET,
@@ -220,13 +222,13 @@ def SongSkip():
 
     if not playerInfoRequest.status_code == 200:
         log(f"Failed to get player info with status code {playerInfoRequest.status_code}.")
-        return
+        return False
 
     isPlaying = not playerInfoRequest.json()["isPaused"]
     
     if not isPlaying:
         log("Music is paused, not skipping.")
-        return
+        return False
 
     skipRequest = ApiHandler.Request(
         method=ApiHandler.Method.POST,
@@ -235,11 +237,12 @@ def SongSkip():
 
     if skipRequest.status_code == 204:
         log("Succesfully skipped current song.")
-
+        return True
     else:
         log(f"Failed to skip current song with status code {skipRequest.status_code}.")
+        return False
 
-def SongInfoRequest():
+def SongInfoRequest() -> str:
     if ApiHandler.IsConnected():
         infoRequest = ApiHandler.Request(
             method=ApiHandler.Method.GET,
@@ -256,6 +259,31 @@ def SongInfoRequest():
     
     return "Nothing playing at the moment"
 
+def QueueInfoRequest(n: int, segmentLen=450) -> list[str]:
+    resp = getQueue()
+    if resp is None:
+        return ["Queue is unavailable right now."]
+
+    queue, currentIndex = resp
+    out = []
+    segment = ""
+
+    for i, song in enumerate(queue[currentIndex + 1:currentIndex + n + 1]):
+        song_str = f"{i+1}. {song.Title} by {song.Author} | "
+
+        if len(segment) + len(song_str) > segmentLen:
+            out.append(segment.rstrip(" | "))
+            segment = song_str
+        else:
+            segment += song_str
+
+    if segment:
+        out.append(segment.rstrip(" | "))
+
+    return out
+
+
+
 def start_api_handler_thread():
     def _thread_func():
         loop = asyncio.new_event_loop()
@@ -263,7 +291,8 @@ def start_api_handler_thread():
 
         async def _check_loop():
             while True:
-                if not ApiHandler.IsConnected():
+                connected = ApiHandler.IsConnected()
+                if not connected:
                     await ApiHandler.Authenticate()
                 await asyncio.sleep(cfg["youtube_music"]["connection_retry_time"])
 

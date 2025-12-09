@@ -12,3 +12,4 @@ redemption_events:
 
 commands:
   song_info: "!song"
+  queue_info: "!queue"
