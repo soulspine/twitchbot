@@ -131,10 +131,19 @@ def getQueue() -> tuple[list[QueueItem], int | None] | None:
             youtubeMusicId = item["playlistPanelVideoWrapperRenderer"]["counterpart"][0]["counterpartRenderer"]["playlistPanelVideoRenderer"]["videoId"]
 
         if base:
+            title = base.get("title", {})
+            title_text = title.get("runs", [{}])[0].get("text", "Unknown Title") if isinstance(title, dict) else "Unknown Title"
+            
+            byline = base.get("longBylineText", {})
+            byline_text = byline.get("runs", [{}])[0].get("text", "Unknown Artist") if isinstance(byline, dict) else "Unknown Artist"
+            
+            if title_text == "Unknown Title" or byline_text == "Unknown Artist":
+                continue
+
             outList.append(QueueItem(
                 base["videoId"],
-                base["title"]["runs"][0]["text"],
-                base["longBylineText"]["runs"][0]["text"],
+                title_text,
+                byline_text,
                 youtubeMusicId
             ))
             if base.get("selected"):
